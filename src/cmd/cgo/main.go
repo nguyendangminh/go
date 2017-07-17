@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -17,7 +17,7 @@ import (
 	"go/ast"
 	"go/printer"
 	"go/token"
-	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -42,7 +42,6 @@ type Package struct {
 	GoFiles     []string // list of Go files
 	GccFiles    []string // list of gcc output files
 	Preamble    string   // collected preamble for _cgo_export.h
-	CgoChecks   []string // see unsafeCheckPointerName
 }
 
 // A File collects information about a single Go input file.
@@ -52,7 +51,7 @@ type File struct {
 	Package  string              // Package name
 	Preamble string              // C preamble (doc comment on import "C")
 	Ref      []*Ref              // all references to C.xxx in AST
-	Calls    []*ast.CallExpr     // all calls to C.xxx in AST
+	Calls    []*Call             // all calls to C.xxx in AST
 	ExpFunc  []*ExpFunc          // exported functions for this file
 	Name     map[string]*Name    // map from Go name to Name
 }
@@ -64,6 +63,12 @@ func nameKeys(m map[string]*Name) []string {
 	}
 	sort.Strings(ks)
 	return ks
+}
+
+// A Call refers to a call of a C.xxx function in the AST.
+type Call struct {
+	Call     *ast.CallExpr
+	Deferred bool
 }
 
 // A Ref refers to an expression of the form C.xxx in the AST.
@@ -83,7 +88,7 @@ type Name struct {
 	Mangle   string // name used in generated Go
 	C        string // name used in C
 	Define   string // #define expansion
-	Kind     string // "const", "type", "var", "fpvar", "func", "not-type"
+	Kind     string // "iconst", "uconst", "fconst", "sconst", "type", "var", "fpvar", "func", "not-type"
 	Type     *Type  // the type of xxx
 	FuncType *FuncType
 	AddError bool
@@ -93,6 +98,11 @@ type Name struct {
 // IsVar reports whether Kind is either "var" or "fpvar"
 func (n *Name) IsVar() bool {
 	return n.Kind == "var" || n.Kind == "fpvar"
+}
+
+// IsConst reports whether Kind is either "iconst", "uconst", "fconst" or "sconst"
+func (n *Name) IsConst() bool {
+	return strings.HasSuffix(n.Kind, "const")
 }
 
 // A ExpFunc is an exported function, callable from C.
@@ -138,6 +148,8 @@ var ptrSizeMap = map[string]int64{
 	"amd64":    8,
 	"arm":      4,
 	"arm64":    8,
+	"mips":     4,
+	"mipsle":   4,
 	"mips64":   8,
 	"mips64le": 8,
 	"ppc64":    8,
@@ -151,12 +163,14 @@ var intSizeMap = map[string]int64{
 	"amd64":    8,
 	"arm":      4,
 	"arm64":    8,
+	"mips":     4,
+	"mipsle":   4,
 	"mips64":   8,
 	"mips64le": 8,
 	"ppc64":    8,
 	"ppc64le":  8,
 	"s390":     4,
-	"s390x":    4,
+	"s390x":    8,
 }
 
 var cPrefix string
@@ -173,6 +187,7 @@ var dynlinker = flag.Bool("dynlinker", false, "record dynamic linker information
 // constant values used in the host's C libraries and system calls.
 var godefs = flag.Bool("godefs", false, "for bootstrap: write Go definitions for C file to standard output")
 
+var srcDir = flag.String("srcdir", "", "source directory")
 var objDir = flag.String("objdir", "", "object directory")
 var importPath = flag.String("importpath", "", "import path of package being built (for comments in generated files)")
 var exportHeader = flag.String("exportheader", "", "where to write export header if any exported functions")
@@ -190,9 +205,9 @@ func main() {
 
 	if *dynobj != "" {
 		// cgo -dynimport is essentially a separate helper command
-		// built into the cgo binary.  It scans a gcc-produced executable
+		// built into the cgo binary. It scans a gcc-produced executable
 		// and dumps information about the imported symbols and the
-		// imported libraries.  The 'go build' rules for cgo prepare an
+		// imported libraries. The 'go build' rules for cgo prepare an
 		// appropriate executable and then use its import information
 		// instead of needing to make the linkers duplicate all the
 		// specialized knowledge gcc has about where to look for imported
@@ -227,6 +242,12 @@ func main() {
 
 	goFiles := args[i:]
 
+	for _, arg := range args[:i] {
+		if arg == "-fsanitize=thread" {
+			tsanProlog = yesTsanProlog
+		}
+	}
+
 	p := newPackage(args[:i])
 
 	// Record CGO_LDFLAGS from the environment for external linking.
@@ -244,23 +265,27 @@ func main() {
 	// concern is other cgo wrappers for the same functions.
 	// Use the beginning of the md5 of the input to disambiguate.
 	h := md5.New()
-	for _, input := range goFiles {
-		f, err := os.Open(input)
+	fs := make([]*File, len(goFiles))
+	for i, input := range goFiles {
+		if *srcDir != "" {
+			input = filepath.Join(*srcDir, input)
+		}
+
+		b, err := ioutil.ReadFile(input)
 		if err != nil {
 			fatalf("%s", err)
 		}
-		io.Copy(h, f)
-		f.Close()
-	}
-	cPrefix = fmt.Sprintf("_%x", h.Sum(nil)[0:6])
+		if _, err = h.Write(b); err != nil {
+			fatalf("%s", err)
+		}
 
-	fs := make([]*File, len(goFiles))
-	for i, input := range goFiles {
 		f := new(File)
-		f.ReadGo(input)
+		f.ParseGo(input, b)
 		f.DiscardCgoDirectives()
 		fs[i] = f
 	}
+
+	cPrefix = fmt.Sprintf("_%x", h.Sum(nil)[0:6])
 
 	if *objDir == "" {
 		// make sure that _obj directory exists, so that we can write

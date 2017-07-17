@@ -1,5 +1,5 @@
-#!/bin/sh
-# Copyright 2012 The Go Authors.  All rights reserved.
+#!/bin/bash
+# Copyright 2012 The Go Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 # Consult http://www.iana.org/time-zones for the latest versions.
 
 # Versions to use.
-CODE=2016a
-DATA=2016a
+CODE=2017b
+DATA=2017b
 
 set -e
 rm -rf work
@@ -42,7 +42,7 @@ zip -0 -r ../../zoneinfo.zip *
 cd ../..
 
 echo
-if [ "$1" == "-work" ]; then 
+if [ "$1" = "-work" ]; then 
 	echo Left workspace behind in work/.
 else
 	rm -rf work

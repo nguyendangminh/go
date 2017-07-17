@@ -5,6 +5,7 @@
 package big
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -302,36 +303,6 @@ func TestModW(t *testing.T) {
 	}
 }
 
-func TestTrailingZeroBits(t *testing.T) {
-	// test 0 case explicitly
-	if n := trailingZeroBits(0); n != 0 {
-		t.Errorf("got trailingZeroBits(0) = %d; want 0", n)
-	}
-
-	x := Word(1)
-	for i := uint(0); i < _W; i++ {
-		n := trailingZeroBits(x)
-		if n != i {
-			t.Errorf("got trailingZeroBits(%#x) = %d; want %d", x, n, i%_W)
-		}
-		x <<= 1
-	}
-
-	// test 0 case explicitly
-	if n := nat(nil).trailingZeroBits(); n != 0 {
-		t.Errorf("got nat(nil).trailingZeroBits() = %d; want 0", n)
-	}
-
-	y := nat(nil).set(natOne)
-	for i := uint(0); i <= 3*_W; i++ {
-		n := y.trailingZeroBits()
-		if n != i {
-			t.Errorf("got 0x%s.trailingZeroBits() = %d; want %d", y.utoa(16), n, i)
-		}
-		y = y.shl(y, 1)
-	}
-}
-
 var montgomeryTests = []struct {
 	x, y, m      string
 	k0           uint64
@@ -509,23 +480,19 @@ func TestExpNN(t *testing.T) {
 	}
 }
 
-func ExpHelper(b *testing.B, x, y Word) {
-	var z nat
-	for i := 0; i < b.N; i++ {
-		z.expWW(x, y)
+func BenchmarkExp3Power(b *testing.B) {
+	const x = 3
+	for _, y := range []Word{
+		0x10, 0x40, 0x100, 0x400, 0x1000, 0x4000, 0x10000, 0x40000, 0x100000, 0x400000,
+	} {
+		b.Run(fmt.Sprintf("%#x", y), func(b *testing.B) {
+			var z nat
+			for i := 0; i < b.N; i++ {
+				z.expWW(x, y)
+			}
+		})
 	}
 }
-
-func BenchmarkExp3Power0x10(b *testing.B)     { ExpHelper(b, 3, 0x10) }
-func BenchmarkExp3Power0x40(b *testing.B)     { ExpHelper(b, 3, 0x40) }
-func BenchmarkExp3Power0x100(b *testing.B)    { ExpHelper(b, 3, 0x100) }
-func BenchmarkExp3Power0x400(b *testing.B)    { ExpHelper(b, 3, 0x400) }
-func BenchmarkExp3Power0x1000(b *testing.B)   { ExpHelper(b, 3, 0x1000) }
-func BenchmarkExp3Power0x4000(b *testing.B)   { ExpHelper(b, 3, 0x4000) }
-func BenchmarkExp3Power0x10000(b *testing.B)  { ExpHelper(b, 3, 0x10000) }
-func BenchmarkExp3Power0x40000(b *testing.B)  { ExpHelper(b, 3, 0x40000) }
-func BenchmarkExp3Power0x100000(b *testing.B) { ExpHelper(b, 3, 0x100000) }
-func BenchmarkExp3Power0x400000(b *testing.B) { ExpHelper(b, 3, 0x400000) }
 
 func fibo(n int) nat {
 	switch n {

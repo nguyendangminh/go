@@ -12,10 +12,14 @@ import (
 
 // A WaitGroup waits for a collection of goroutines to finish.
 // The main goroutine calls Add to set the number of
-// goroutines to wait for.  Then each of the goroutines
-// runs and calls Done when finished.  At the same time,
+// goroutines to wait for. Then each of the goroutines
+// runs and calls Done when finished. At the same time,
 // Wait can be used to block until all goroutines have finished.
+//
+// A WaitGroup must not be copied after first use.
 type WaitGroup struct {
+	noCopy noCopy
+
 	// 64-bit value: high 32 bits are counter, low 32 bits are waiter count.
 	// 64-bit atomic operations require 64-bit alignment, but 32-bit
 	// compilers do not ensure it. So we allocate 12 bytes and then use
@@ -87,11 +91,11 @@ func (wg *WaitGroup) Add(delta int) {
 	// Reset waiters count to 0.
 	*statep = 0
 	for ; w != 0; w-- {
-		runtime_Semrelease(&wg.sema)
+		runtime_Semrelease(&wg.sema, false)
 	}
 }
 
-// Done decrements the WaitGroup counter.
+// Done decrements the WaitGroup counter by one.
 func (wg *WaitGroup) Done() {
 	wg.Add(-1)
 }

@@ -15,7 +15,7 @@ import (
  */
 
 // An Encoding is a radix 64 encoding/decoding scheme, defined by a
-// 64-character alphabet.  The most common encoding is the "base64"
+// 64-character alphabet. The most common encoding is the "base64"
 // encoding defined in RFC 4648 and used in MIME (RFC 2045) and PEM
 // (RFC 1421).  RFC 4648 also defines an alternate encoding, which is
 // the standard encoding with - and _ substituted for + and /.
@@ -23,6 +23,7 @@ type Encoding struct {
 	encode    [64]byte
 	decodeMap [256]byte
 	padChar   rune
+	strict    bool
 }
 
 const (
@@ -34,12 +35,18 @@ const encodeStd = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345678
 const encodeURL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 // NewEncoding returns a new padded Encoding defined by the given alphabet,
-// which must be a 64-byte string.
+// which must be a 64-byte string that does not contain the padding character
+// or CR / LF ('\r', '\n').
 // The resulting Encoding uses the default padding character ('='),
 // which may be changed or disabled via WithPadding.
 func NewEncoding(encoder string) *Encoding {
 	if len(encoder) != 64 {
 		panic("encoding alphabet is not 64-bytes long")
+	}
+	for i := 0; i < len(encoder); i++ {
+		if encoder[i] == '\n' || encoder[i] == '\r' {
+			panic("encoding alphabet contains newline character")
+		}
 	}
 
 	e := new(Encoding)
@@ -57,8 +64,29 @@ func NewEncoding(encoder string) *Encoding {
 
 // WithPadding creates a new encoding identical to enc except
 // with a specified padding character, or NoPadding to disable padding.
+// The padding character must not be '\r' or '\n', must not
+// be contained in the encoding's alphabet and must be a rune equal or
+// below '\xff'.
 func (enc Encoding) WithPadding(padding rune) *Encoding {
+	if padding == '\r' || padding == '\n' || padding > 0xff {
+		panic("invalid padding")
+	}
+
+	for i := 0; i < len(enc.encode); i++ {
+		if rune(enc.encode[i]) == padding {
+			panic("padding contained in alphabet")
+		}
+	}
+
 	enc.padChar = padding
+	return &enc
+}
+
+// Strict creates a new encoding identical to enc except with
+// strict decoding enabled. In this mode, the decoder requires that
+// trailing padding bits are zero, as described in RFC 4648 section 3.5.
+func (enc Encoding) Strict() *Encoding {
+	enc.strict = true
 	return &enc
 }
 
@@ -89,7 +117,7 @@ var RawURLEncoding = URLEncoding.WithPadding(NoPadding)
 //
 // The encoding pads the output to a multiple of 4 bytes,
 // so Encode is not appropriate for use on individual blocks
-// of a large data stream.  Use NewEncoder() instead.
+// of a large data stream. Use NewEncoder() instead.
 func (enc *Encoding) Encode(dst, src []byte) {
 	if len(src) == 0 {
 		return
@@ -213,7 +241,7 @@ func (e *encoder) Close() error {
 	return e.err
 }
 
-// NewEncoder returns a new base64 stream encoder.  Data written to
+// NewEncoder returns a new base64 stream encoder. Data written to
 // the returned writer will be encoded using enc and then written to w.
 // Base64 encodings operate in 4-byte blocks; when finished
 // writing, the caller must Close the returned encoder to flush any
@@ -247,19 +275,17 @@ func (e CorruptInputError) Error() string {
 func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 	si := 0
 
-	// skip over newlines
-	for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
-		si++
-	}
-
 	for si < len(src) && !end {
 		// Decode quantum using the base64 alphabet
 		var dbuf [4]byte
 		dinc, dlen := 3, 4
 
-		for j := range dbuf {
+		for j := 0; j < len(dbuf); j++ {
 			if len(src) == si {
-				if enc.padChar != NoPadding || j < 2 {
+				switch {
+				case j == 0:
+					return n, false, nil
+				case j == 1, enc.padChar != NoPadding:
 					return n, false, CorruptInputError(si - j)
 				}
 				dinc, dlen, end = j-1, j, true
@@ -268,11 +294,17 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 			in := src[si]
 
 			si++
-			// skip over newlines
-			for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
-				si++
+
+			out := enc.decodeMap[in]
+			if out != 0xFF {
+				dbuf[j] = out
+				continue
 			}
 
+			if in == '\n' || in == '\r' {
+				j--
+				continue
+			}
 			if rune(in) == enc.padChar {
 				// We've reached the end and there's padding
 				switch j {
@@ -281,6 +313,10 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 					return n, false, CorruptInputError(si - 1)
 				case 2:
 					// "==" is expected, the first "=" is already consumed.
+					// skip over newlines
+					for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+						si++
+					}
 					if si == len(src) {
 						// not enough padding
 						return n, false, CorruptInputError(len(src))
@@ -291,10 +327,10 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 					}
 
 					si++
-					// skip over newlines
-					for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
-						si++
-					}
+				}
+				// skip over newlines
+				for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+					si++
 				}
 				if si < len(src) {
 					// trailing garbage
@@ -303,23 +339,29 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 				dinc, dlen, end = 3, j, true
 				break
 			}
-			dbuf[j] = enc.decodeMap[in]
-			if dbuf[j] == 0xFF {
-				return n, false, CorruptInputError(si - 1)
-			}
+			return n, false, CorruptInputError(si - 1)
 		}
 
 		// Convert 4x 6bit source bytes into 3 bytes
 		val := uint(dbuf[0])<<18 | uint(dbuf[1])<<12 | uint(dbuf[2])<<6 | uint(dbuf[3])
+		dbuf[2], dbuf[1], dbuf[0] = byte(val>>0), byte(val>>8), byte(val>>16)
 		switch dlen {
 		case 4:
-			dst[2] = byte(val >> 0)
+			dst[2] = dbuf[2]
+			dbuf[2] = 0
 			fallthrough
 		case 3:
-			dst[1] = byte(val >> 8)
+			dst[1] = dbuf[1]
+			if enc.strict && dbuf[2] != 0 {
+				return n, end, CorruptInputError(si - 1)
+			}
+			dbuf[1] = 0
 			fallthrough
 		case 2:
-			dst[0] = byte(val >> 16)
+			dst[0] = dbuf[0]
+			if enc.strict && (dbuf[1] != 0 || dbuf[2] != 0) {
+				return n, end, CorruptInputError(si - 2)
+			}
 		}
 		dst = dst[dinc:]
 		n += dlen - 1
@@ -328,9 +370,9 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 	return n, end, err
 }
 
-// Decode decodes src using the encoding enc.  It writes at most
+// Decode decodes src using the encoding enc. It writes at most
 // DecodedLen(len(src)) bytes to dst and returns the number of bytes
-// written.  If src contains invalid base64 data, it will return the
+// written. If src contains invalid base64 data, it will return the
 // number of bytes successfully written and CorruptInputError.
 // New line characters (\r and \n) are ignored.
 func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
@@ -459,7 +501,7 @@ func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
 func (enc *Encoding) DecodedLen(n int) int {
 	if enc.padChar == NoPadding {
 		// Unpadded data may end with partial block of 2-3 characters.
-		return (n*6 + 7) / 8
+		return n * 6 / 8
 	}
 	// Padded base64 should always be a multiple of 4 characters in length.
 	return n / 4 * 3
